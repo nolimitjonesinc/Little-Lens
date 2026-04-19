@@ -1,30 +1,37 @@
 {
   "expo": {
-    "name": "LittleLens-Mobile",
-    "slug": "LittleLens-Mobile",
+    "name": "LittleLens",
+    "slug": "littlelens-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "scheme": "littlelens",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#faf7f2"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.littlelens.mobile",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "LittleLens needs microphone access to record teacher observations.",
+        "NSSpeechRecognitionUsageDescription": "LittleLens uses speech recognition to transcribe your spoken observations."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#faf7f2"
       },
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "package": "com.littlelens.mobile"
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    }
+    "platforms": ["ios", "android"],
+    "plugins": [
+      "expo-router",
+      "expo-speech-recognition"
+    ]
   }
 }
