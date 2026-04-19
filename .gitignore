@@ -42,3 +42,8 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Next.js build output (for web/ subfolder)
+.next/
+web/.next/
+web/node_modules/

@@ -9,16 +9,20 @@ import {
   ScrollView,
   KeyboardAvoidingView,
   Platform,
+  Image,
+  Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import {
   SpeechRecognition,
   useSpeechRecognitionEvent,
   SPEECH_AVAILABLE,
 } from "../../../lib/speechSafe";
 import { tagObservation, getTeacherId } from "../../../lib/api";
+import { uploadObservationPhoto } from "../../../lib/photoStorage";
 import { supabase } from "../../../lib/supabase";
 import { SEED_CHILDREN } from "../../../lib/seed-data";
 
@@ -37,6 +41,7 @@ export default function QuickCaptureChild() {
   const [liveText, setLiveText] = useState("");
   const [finalText, setFinalText] = useState("");
   const [editableText, setEditableText] = useState("");
+  const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [showDoneHint, setShowDoneHint] = useState(false);
   const [error, setError] = useState("");
 
@@ -142,7 +147,7 @@ export default function QuickCaptureChild() {
     setShowDoneHint(false);
     const text = accumulatedText.current.trim();
 
-    if (text.length < 3) {
+    if (text.length < 3 && !photoUri) {
       setEditableText("");
       setStage("editing");
       return;
@@ -151,7 +156,7 @@ export default function QuickCaptureChild() {
     setEditableText(text);
     void doAutoSave(text);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [photoUri]);
 
   useSpeechRecognitionEvent("result", (event: any) => {
     const transcript = event.results?.[0]?.transcript ?? "";
@@ -177,7 +182,7 @@ export default function QuickCaptureChild() {
   useSpeechRecognitionEvent("end", () => {
     if (stage === "listening") {
       const text = accumulatedText.current.trim();
-      if (text.length >= 3) {
+      if (text.length >= 3 || photoUri) {
         setEditableText(text);
         void doAutoSave(text);
       } else {
@@ -186,20 +191,74 @@ export default function QuickCaptureChild() {
     }
   });
 
+  const handleTakePhoto = async () => {
+    stopListening();
+    clearSilenceTimers();
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert("Camera access needed", "Allow camera access in Settings.");
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      });
+      if (!result.canceled && result.assets[0]) {
+        setPhotoUri(result.assets[0].uri);
+        if (stage === "listening") setStage("editing");
+      }
+    } catch (e) {
+      console.warn(e);
+      Alert.alert("Camera unavailable", "This feature needs a rebuild to work.");
+    }
+  };
+
+  const handlePickPhoto = async () => {
+    stopListening();
+    clearSilenceTimers();
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert("Photos access needed", "Allow photo library access in Settings.");
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        quality: 0.8,
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      });
+      if (!result.canceled && result.assets[0]) {
+        setPhotoUri(result.assets[0].uri);
+        if (stage === "listening") setStage("editing");
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  };
+
   const doAutoSave = async (text: string) => {
     setStage("saving");
     setError("");
     try {
       let cleaned = text;
       let domains: string[] = [];
-      try {
-        const result = await tagObservation(text);
-        cleaned = result.cleaned_text || text;
-        domains = result.domains || [];
-      } catch (e) {
-        console.warn("AI tagging skipped:", e);
+      if (text.trim().length > 0) {
+        try {
+          const result = await tagObservation(text);
+          cleaned = result.cleaned_text || text;
+          domains = result.domains || [];
+        } catch (e) {
+          console.warn("AI tagging skipped:", e);
+        }
       }
-      await saveToDatabase(text, cleaned, domains);
+
+      let photoUrl: string | null = null;
+      if (photoUri && childId) {
+        const uploaded = await uploadObservationPhoto(childId, photoUri);
+        photoUrl = uploaded.publicUrl;
+      }
+
+      await saveToDatabase(text, cleaned, domains, photoUrl, photoUri);
       setStage("saved");
       if (typeof global !== "undefined") {
         (global as any).__ll_last_saved = child?.firstName || "child";
@@ -215,28 +274,37 @@ export default function QuickCaptureChild() {
     }
   };
 
-  const saveToDatabase = async (raw: string, cleaned: string, domains: string[]) => {
+  const saveToDatabase = async (
+    raw: string,
+    cleaned: string,
+    domains: string[],
+    photoUrl: string | null,
+    localPhotoUri: string | null
+  ) => {
     if (!childId) return;
     try {
       const teacherId = await getTeacherId();
-      const { error: insertError } = await supabase.from("ll_observations").insert({
+      const record: any = {
         child_id: childId,
         teacher_id: teacherId,
         raw_text: raw,
-        cleaned_text: cleaned,
+        cleaned_text: cleaned || (photoUrl || localPhotoUri ? "(photo)" : ""),
         domains,
-      });
+      };
+      if (photoUrl) record.photo_url = photoUrl;
+      else if (localPhotoUri) record.photo_url = localPhotoUri;
+
+      const { error: insertError } = await supabase.from("ll_observations").insert(record);
       if (insertError) throw insertError;
     } catch (e) {
-      // Demo mode / offline — swallow and proceed
       console.warn("Supabase insert skipped:", e);
     }
   };
 
   const handleManualSave = async () => {
     const text = editableText.trim();
-    if (text.length < 3) {
-      setError("Say or type a little more.");
+    if (text.length < 3 && !photoUri) {
+      setError("Add a note or a photo.");
       return;
     }
     setError("");
@@ -271,11 +339,11 @@ export default function QuickCaptureChild() {
 
       {stage === "listening" && (
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32 }}>
-          <Text style={{ color: "rgba(255,255,255,0.4)", fontSize: 14, marginBottom: 48, letterSpacing: 1 }}>
+          <Text style={{ color: "rgba(255,255,255,0.4)", fontSize: 14, marginBottom: 40, letterSpacing: 1 }}>
             {childName.toUpperCase()}
           </Text>
 
-          <Pressable onPress={handleStopAndSave} style={{ alignItems: "center", marginBottom: 48 }}>
+          <Pressable onPress={handleStopAndSave} style={{ alignItems: "center", marginBottom: 24 }}>
             <Animated.View
               style={{
                 width: 160,
@@ -300,26 +368,45 @@ export default function QuickCaptureChild() {
                 <Ionicons name="mic" size={52} color="white" />
               </View>
             </Animated.View>
-            <Text style={{ color: "rgba(255,255,255,0.6)", fontSize: 13, marginTop: 20 }}>
+            <Text style={{ color: "rgba(255,255,255,0.6)", fontSize: 13, marginTop: 16 }}>
               Tap to stop · pause to auto-save
             </Text>
           </Pressable>
 
-          <View style={{ minHeight: 80, alignItems: "center", paddingHorizontal: 16 }}>
+          <Pressable
+            onPress={handleTakePhoto}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              backgroundColor: "rgba(255,255,255,0.08)",
+              borderWidth: 1,
+              borderColor: "rgba(255,255,255,0.15)",
+              paddingHorizontal: 20,
+              paddingVertical: 12,
+              borderRadius: 999,
+              gap: 8,
+              marginBottom: 20,
+            }}
+          >
+            <Ionicons name="camera-outline" size={20} color="white" />
+            <Text style={{ color: "white", fontSize: 14, fontWeight: "600" }}>Add a photo</Text>
+          </Pressable>
+
+          <View style={{ minHeight: 60, alignItems: "center", paddingHorizontal: 16 }}>
             {displayText ? (
               <Text
-                style={{ color: "white", fontSize: 18, lineHeight: 28, textAlign: "center", fontStyle: "italic" }}
+                style={{ color: "white", fontSize: 16, lineHeight: 24, textAlign: "center", fontStyle: "italic" }}
               >
                 &ldquo;{displayText}&rdquo;
               </Text>
             ) : (
-              <Text style={{ color: "rgba(255,255,255,0.3)", fontSize: 15, textAlign: "center" }}>
+              <Text style={{ color: "rgba(255,255,255,0.3)", fontSize: 14, textAlign: "center" }}>
                 Listening for {childName}...
               </Text>
             )}
           </View>
 
-          <Animated.View style={{ opacity: hintOpacity, marginTop: 32 }}>
+          <Animated.View style={{ opacity: hintOpacity, marginTop: 16 }}>
             <Pressable
               onPress={handleStopAndSave}
               style={{
@@ -343,9 +430,12 @@ export default function QuickCaptureChild() {
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32 }}>
           <ActivityIndicator color="#f0a038" size="large" />
           <Text style={{ marginTop: 16, color: "#6b7280", fontSize: 15 }}>Saving note for {childName}...</Text>
+          {photoUri && (
+            <Image source={{ uri: photoUri }} style={{ marginTop: 16, width: 120, height: 120, borderRadius: 12 }} />
+          )}
           {editableText ? (
             <Text
-              style={{ marginTop: 24, color: "#9ca3af", fontSize: 13, fontStyle: "italic", textAlign: "center", paddingHorizontal: 20 }}
+              style={{ marginTop: 20, color: "#9ca3af", fontSize: 13, fontStyle: "italic", textAlign: "center", paddingHorizontal: 20 }}
             >
               &ldquo;{editableText}&rdquo;
             </Text>
@@ -377,12 +467,36 @@ export default function QuickCaptureChild() {
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled">
             <View style={{ flex: 1, padding: 20, paddingTop: 60 }}>
               <Text style={{ fontSize: 22, fontWeight: "700", color: "#1f2937", marginBottom: 4 }}>
-                {SPEECH_AVAILABLE ? "Edit & save" : "Type a note"}
+                {photoUri && editableText === "" ? "Add context (optional)" : "Edit & save"}
               </Text>
-              <Text style={{ fontSize: 14, color: "#6b7280", marginBottom: 24 }}>
+              <Text style={{ fontSize: 14, color: "#6b7280", marginBottom: 20 }}>
                 Note for {childName}.
-                {!SPEECH_AVAILABLE && " (Voice recording isn't available in this build.)"}
               </Text>
+
+              {photoUri && (
+                <View style={{ marginBottom: 14 }}>
+                  <Image
+                    source={{ uri: photoUri }}
+                    style={{ width: "100%", height: 220, borderRadius: 14, backgroundColor: "#e5e7eb" }}
+                  />
+                  <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                    <Pressable
+                      onPress={handleTakePhoto}
+                      style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, backgroundColor: "#fef3c7" }}
+                    >
+                      <Ionicons name="refresh" size={14} color="#b45309" />
+                      <Text style={{ fontSize: 12, fontWeight: "600", color: "#b45309" }}>Retake</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => setPhotoUri(null)}
+                      style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, backgroundColor: "#fee2e2" }}
+                    >
+                      <Ionicons name="trash" size={14} color="#b91c1c" />
+                      <Text style={{ fontSize: 12, fontWeight: "600", color: "#b91c1c" }}>Remove</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
 
               <TextInput
                 style={{
@@ -393,7 +507,7 @@ export default function QuickCaptureChild() {
                   padding: 16,
                   fontSize: 16,
                   lineHeight: 24,
-                  minHeight: 180,
+                  minHeight: 140,
                   textAlignVertical: "top",
                   color: "#1f2937",
                 }}
@@ -403,9 +517,9 @@ export default function QuickCaptureChild() {
                   setEditableText(t);
                   if (error) setError("");
                 }}
-                placeholder={`Type what you observed about ${childName}...`}
+                placeholder={photoUri ? "What happened in this photo? (optional)" : `Type what you observed about ${childName}...`}
                 placeholderTextColor="#9ca3af"
-                autoFocus={!editableText}
+                autoFocus={!editableText && !photoUri}
               />
 
               {error ? (
@@ -415,18 +529,39 @@ export default function QuickCaptureChild() {
                 </View>
               ) : null}
 
-              {SPEECH_AVAILABLE && (
-                <Pressable
-                  onPress={() => {
-                    setError("");
-                    startListening();
-                  }}
-                  style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 16, paddingVertical: 8 }}
-                >
-                  <Ionicons name="mic-outline" size={16} color="#f0a038" />
-                  <Text style={{ color: "#f0a038", fontSize: 14, fontWeight: "500" }}>Record again</Text>
-                </Pressable>
-              )}
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+                {SPEECH_AVAILABLE && (
+                  <Pressable
+                    onPress={() => {
+                      setError("");
+                      startListening();
+                    }}
+                    style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, backgroundColor: "#fef3c7" }}
+                  >
+                    <Ionicons name="mic-outline" size={16} color="#b45309" />
+                    <Text style={{ color: "#b45309", fontSize: 13, fontWeight: "600" }}>Record voice</Text>
+                  </Pressable>
+                )}
+
+                {!photoUri && (
+                  <>
+                    <Pressable
+                      onPress={handleTakePhoto}
+                      style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, backgroundColor: "#fef3c7" }}
+                    >
+                      <Ionicons name="camera-outline" size={16} color="#b45309" />
+                      <Text style={{ color: "#b45309", fontSize: 13, fontWeight: "600" }}>Take photo</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handlePickPhoto}
+                      style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, backgroundColor: "#eef0ed" }}
+                    >
+                      <Ionicons name="images-outline" size={16} color="#4d7c52" />
+                      <Text style={{ color: "#4d7c52", fontSize: 13, fontWeight: "600" }}>Choose photo</Text>
+                    </Pressable>
+                  </>
+                )}
+              </View>
             </View>
           </ScrollView>
 
@@ -440,9 +575,9 @@ export default function QuickCaptureChild() {
           >
             <Pressable
               onPress={handleManualSave}
-              disabled={!editableText.trim()}
+              disabled={!editableText.trim() && !photoUri}
               style={({ pressed }) => ({
-                backgroundColor: !editableText.trim() ? "#d1d5db" : pressed ? "#d97706" : "#f0a038",
+                backgroundColor: !editableText.trim() && !photoUri ? "#d1d5db" : pressed ? "#d97706" : "#f0a038",
                 borderRadius: 12,
                 paddingVertical: 16,
                 alignItems: "center",
@@ -451,9 +586,9 @@ export default function QuickCaptureChild() {
                 gap: 8,
               })}
             >
-              <Ionicons name="sparkles" size={18} color={editableText.trim() ? "white" : "#9ca3af"} />
-              <Text style={{ color: editableText.trim() ? "white" : "#9ca3af", fontSize: 16, fontWeight: "600" }}>
-                Save note
+              <Ionicons name="sparkles" size={18} color={(editableText.trim() || photoUri) ? "white" : "#9ca3af"} />
+              <Text style={{ color: (editableText.trim() || photoUri) ? "white" : "#9ca3af", fontSize: 16, fontWeight: "600" }}>
+                Save {photoUri ? "photo & " : ""}note
               </Text>
             </Pressable>
           </View>
