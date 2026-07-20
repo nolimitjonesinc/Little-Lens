@@ -17,6 +17,7 @@ _Auto-updated by Status Brain on every push. Last change: Add Status Brain workf
 - **Mobile-ready UI** — Expo Router navigation, NativeWind/Tailwind styling, voice recording with mic button
 - **Seed data** — demo class rosters (Sugar Maples, Maple Leafs, Big Leaves, TK) for testing
 - **Photo storage** — local photo handling for scans (Expo Image Picker)
+- **Status Brain automation** — auto-generated project status on every push
 
 ## Recent changes (newest first)
 - 2026-07-20 — Added Status Brain workflow and script for auto-updating project status
